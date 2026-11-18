@@ -2,6 +2,8 @@
 Integration tests for cascade delete on multiple backends.
 """
 
+from unittest.mock import patch
+
 import pytest
 
 import datajoint as dj
@@ -579,3 +581,59 @@ def test_drop_rejects_invalid_part_integrity(schema_by_backend):
 
     # validation fired before any drop work — table intact
     assert len(Keeper()) == 1
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, EOFError])
+def test_delete_prompt_interrupt_rolls_back(schema_by_backend, interrupt):
+    """Ctrl-C or end of input at the commit prompt rolls the delete back (#1691)."""
+
+    @schema_by_backend
+    class Subject(dj.Manual):
+        definition = """
+        subject_id : int32
+        """
+
+    Subject.insert([(1,), (2,), (3,)])
+
+    with patch("builtins.input", side_effect=interrupt), pytest.raises(interrupt):
+        (Subject & {"subject_id": 1}).delete(prompt=True)
+
+    assert not Subject.connection.in_transaction
+    assert len(Subject()) == 3
+
+
+def test_delete_interrupt_during_cascade_rolls_back(schema_by_backend):
+    """Ctrl-C between the cascade's deletes rolls back the ones already done (#1691)."""
+
+    @schema_by_backend
+    class Parent(dj.Manual):
+        definition = """
+        parent_id : int32
+        """
+
+    @schema_by_backend
+    class Child(dj.Manual):
+        definition = """
+        -> Parent
+        child_id : int32
+        """
+
+    Parent.insert([(1,), (2,)])
+    Child.insert([(1, 1), (1, 2), (2, 1)])
+
+    delete_quick = dj.Table.delete_quick
+    deleted = []
+
+    def interrupt_at_parent(self, get_count=False):
+        if self.full_table_name == Parent.full_table_name:
+            raise KeyboardInterrupt
+        deleted.append(self.full_table_name)
+        return delete_quick(self, get_count=get_count)
+
+    with patch.object(dj.Table, "delete_quick", interrupt_at_parent), pytest.raises(KeyboardInterrupt):
+        (Parent & {"parent_id": 1}).delete(prompt=False)
+
+    assert deleted == [Child.full_table_name]
+    assert not Parent.connection.in_transaction
+    assert len(Parent()) == 2
+    assert len(Child()) == 3

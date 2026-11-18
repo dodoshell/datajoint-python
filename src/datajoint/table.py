@@ -1201,7 +1201,7 @@ class Table(QueryExpression):
                     "deleting.".format(child=match["child"])
                 ) from None
             raise DataJointError("Delete blocked by FK in unloaded/inaccessible schema.") from None
-        except Exception:
+        except BaseException:
             if transaction:
                 conn.cancel_transaction()
             raise
@@ -1229,7 +1229,13 @@ class Table(QueryExpression):
         elif not transaction:
             logger.info("Delete completed")
         else:
-            if not prompt or user_choice("Commit deletes?", default="no") == "yes":
+            try:
+                commit = not prompt or user_choice("Commit deletes?", default="no") == "yes"
+            except BaseException:
+                if transaction:
+                    conn.cancel_transaction()
+                raise
+            if commit:
                 if transaction:
                     conn.commit_transaction()
                 if prompt:
